@@ -28,9 +28,9 @@
 <script>
 /* ---- title catalog ---- */
 var SHOWS = {
-  "loki":           {name:"Loki", tmdb:84958, seasons:{1:6, 2:6}},
-  "breaking-bad":   {name:"Breaking Bad", tmdb:1396, seasons:{1:7, 2:13, 3:13, 4:13, 5:16}},
-  "john-wick-4":    {name:"John Wick: Chapter 4", movie:603692, run:"2j 49m"},
+  "loki":         {name:"Loki", tmdb:84958, seasons:{1:6, 2:6}},
+  "breaking-bad": {name:"Breaking Bad", tmdb:1396, seasons:{1:7, 2:13, 3:13, 4:13, 5:16}},
+  "john-wick-4":  {name:"John Wick: Chapter 4", movie:603692},
 };
 
 /* ---- read the request ---- */
@@ -46,29 +46,76 @@ var msg = document.getElementById("msg");
 var badge = document.getElementById("badge");
 var pick = document.getElementById("pick");
 var sel = document.getElementById("season");
-var hls = null;
+var hls = null, retried = false;
 
 function say(t){ msg.textContent = t; }
 function showOvl(t){ say(t); ovl.classList.remove("hide"); }
 function hideOvl(){ ovl.classList.add("hide"); }
 function setBadge(t){ badge.textContent = t; }
-
-function total(){
-  if (S.movie) return 1;
-  return S.seasons[seas];
-}
+function total(){ return S.movie ? 1 : S.seasons[seas]; }
 function isMovie(){ return !!S.movie; }
+
+/* ---- CDN token ----
+   generate.php mints a JWT: 4 h TTL, bound to the caller's /24, valid for every
+   episode and every mirror. It sits behind a tight per-IP limiter that answers
+   429 with NO CORS headers — and a CORS-less response is precisely the opaque
+   "Load failed" Safari shows. So mint once, keep it, and never ask again until
+   it expires. That turns ~1 request per tap into ~1 request per 4 hours. */
+var TOKKEY = "wl_tok";
+var HOSTKEY = "wl_host";
+
+function jwtExp(t){
+  try {
+    var p = t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(p + "===".slice((p.length + 3) % 4))).exp - 60;
+  } catch (e) { return Math.floor(Date.now() / 1e3) + 10800; }
+}
+function tokRead(){
+  try {
+    var s = JSON.parse(localStorage.getItem(TOKKEY) || "null");
+    return (s && s.exp > Date.now() / 1e3) ? s.t : null;
+  } catch (e) { return null; }
+}
+function tokWrite(t){ try { localStorage.setItem(TOKKEY, JSON.stringify({t: t, exp: jwtExp(t)})); } catch (e) {} }
+
+function mintToken(host, quiet){
+  var wait = [0, 6000, 15000];
+  var i = 0;
+  function attempt(){
+    return fetch(host + "/generate.php", {credentials: "omit"}).then(function(r){
+      return r.text().then(function(t){
+        t = t.trim();
+        if (r.ok && t.split(".").length === 3) { tokWrite(t); return t; }
+        return null;
+      });
+    }).catch(function(){ return null; }).then(function(t){
+      if (t) return t;
+      i++;
+      if (i >= wait.length) return null;
+      if (!quiet) say("Server token penuh — ulang dalam " + (wait[i] / 1000) + " detik…");
+      return new Promise(function(res){ setTimeout(res, wait[i]); }).then(attempt);
+    });
+  }
+  return attempt();
+}
+
+async function getToken(host){
+  var c = tokRead();
+  if (c) return c;
+  var t = await mintToken(host, false);
+  if (!t) throw new Error("server token penuh — tap untuk ulang");
+  return t;
+}
 
 /* ---- the ad-free chain ----
    1. data.vidsrc.sh API      -> encrypted stream_urls + per-window wasm
    2. wasm (ChaCha20)         -> plaintext array of HLS urls
-   3. <host>/generate.php     -> per-IP token
+   3. <host>/generate.php     -> cached per-IP token
    4. url?token=...           -> playable HLS, straight into <video>
    No wrapper page, no iframes, no ad networks. */
 async function decrypt(vs, b64s) {
   var wb = await fetch(vs.wasm_url, {credentials:"omit"}).then(function(r){ return r.arrayBuffer(); });
-  var mod = await WebAssembly.compile(wb);
-  var inst = await WebAssembly.instantiate(mod, {});
+  var inst = await WebAssembly.instantiate(await WebAssembly.compile(wb), {});
   var ex = inst.exports;
   var bin = atob(b64s), enc = new Uint8Array(bin.length);
   for (var i = 0; i < bin.length; i++) enc[i] = bin.charCodeAt(i);
@@ -89,15 +136,16 @@ async function resolve(show, season, episode) {
   if (j.vs && typeof u === "string") u = await decrypt(j.vs, u);
   if (!Array.isArray(u) || !u.length) throw new Error("no stream");
   var base = new URL(u[0]);
-  var tk = (await fetch(base.origin + "/generate.php", {credentials:"omit"}).then(function(r){ return r.text(); })).trim();
+  try { localStorage.setItem(HOSTKEY, base.origin); } catch (e) {}
   window.__file = j.data.file_name || "";
+  var tk = await getToken(base.origin);
   return u[0] + (u[0].indexOf("?") >= 0 ? "&" : "?") + "token=" + encodeURIComponent(tk);
 }
 
-/* hls.js reaches the segments over XHR; that CDN only sends CORS headers for the
-   playlists, so on desktop Chromium the segment fetch is blocked. Safari plays HLS
-   natively (no XHR, no CORS) — which is why this page is built for phones. Any fatal
-   error downgrades to the embed link instead of leaving a black rectangle. */
+/* hls.js reaches segments over XHR, and that CDN sends CORS headers for the
+   playlists but not the segments — so desktop Chromium cannot do this at all.
+   Safari plays HLS natively (no XHR, no CORS): that is why this page is for
+   phones. Any fatal error downgrades to an embed link, never a black rectangle. */
 function fail(why) {
   var link = isMovie()
     ? "https://vidsrc.to/embed/movie/" + S.movie
@@ -109,15 +157,16 @@ function fail(why) {
   var a = document.createElement("a");
   a.href = link; a.textContent = "Buka lewat jalur cadangan \u2192";
   msg.appendChild(a);
-  var note = document.createElement("div");
-  note.style.cssText = "margin-top:10px;font-size:12px;color:#7c7c8a";
-  note.textContent = "Di iPhone/Safari jalur utama jalan langsung tanpa iklan.";
-  msg.appendChild(note);
+  var n = document.createElement("div");
+  n.style.cssText = "margin-top:10px;font-size:12px;color:#7c7c8a";
+  n.textContent = "Tap layar ini buat ulang.";
+  msg.appendChild(n);
   ovl.classList.remove("hide");
 }
 
 async function play() {
   var label = S.name + (isMovie() ? "" : " S" + seas + "E" + ep);
+  retried = false;
   document.getElementById("ttl").textContent = label;
   document.title = label;
   if (hls) { try { hls.destroy(); } catch(e){} hls = null; }
@@ -128,9 +177,6 @@ async function play() {
     var url = await resolve(S, seas, ep);
     say("Buffering…");
     setBadge("1080p");
-    // Chromium reports canPlayType('application/vnd.apple.mpegurl') as "maybe" but cannot
-    // actually demux HLS, so gate on the engine, not on canPlayType. Safari plays HLS
-    // natively (PiP, AirPlay, better battery); everyone else gets hls.js over MSE.
     var safari = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
                  (/Safari/.test(navigator.userAgent) && !/Chrome|Chromium|CriOS|Android|Edg/.test(navigator.userAgent));
     if (safari && v.canPlayType("application/vnd.apple.mpegurl")) {
@@ -143,7 +189,7 @@ async function play() {
       throw new Error("HLS tidak didukung browser ini");
     }
     v.play().catch(function(){});
-    localStorage.setItem("wl_last_" + slug, isMovie() ? "m" : seas + ":" + ep);
+    try { localStorage.setItem("wl_last_" + slug, isMovie() ? "m" : seas + ":" + ep); } catch (e) {}
   } catch (err) {
     fail(err.message);
   }
@@ -154,18 +200,33 @@ v.addEventListener("loadeddata", hideOvl);
 v.addEventListener("playing", hideOvl);
 ovl.addEventListener("click", function(e){ if (e.target.tagName !== "A") play(); });
 
+/* a stale token (mobile handoff changed our /24) surfaces as a media error, not
+   as a 4xx we can read — so drop the cached token and try exactly once more */
+v.addEventListener("error", function(){
+  if (retried || !v.getAttribute("src")) return;
+  retried = true;
+  try { localStorage.removeItem(TOKKEY); } catch (e) {}
+  setTimeout(play, 1200);
+});
+
+/* warm the token while the user is still picking an episode */
+if (!tokRead()) {
+  try {
+    var lh = localStorage.getItem(HOSTKEY);
+    if (lh) mintToken(lh, true);
+  } catch (e) {}
+}
+
 /* ---- episode / season UI ---- */
 function paint() {
   var n = total();
   if (S.seasons) {
     var keys = Object.keys(S.seasons).map(Number).sort(function(a,b){ return a-b; });
-    if (keys.length > 1) {
+    if (keys.length > 1 && !sel.options.length) {
       sel.hidden = false;
-      if (!sel.options.length) {
-        keys.forEach(function(k){ sel.add(new Option("Season " + k, k)); });
-      }
-      sel.value = seas;
+      keys.forEach(function(k){ sel.add(new Option("Season " + k, k)); });
     }
+    sel.value = seas;
   }
   pick.innerHTML = "";
   for (var i = 1; i <= n; i++) {
@@ -174,7 +235,7 @@ function paint() {
     if (i === ep) a.className = "cur";
     pick.appendChild(a);
   }
-  if (n === 1) { document.getElementById("list").hidden = true; }
+  if (n === 1) document.getElementById("list").hidden = true;
 }
 function go(n, s) {
   n = Math.max(1, Math.min(total(), n));
@@ -198,11 +259,13 @@ document.addEventListener("keydown", function(e){
 
 /* resume where we left off */
 if (!P.get("e")) {
-  var last = localStorage.getItem("wl_last_" + slug);
-  if (last && last !== "m") {
-    var parts = last.split(":");
-    if (S.seasons && S.seasons[Number(parts[0])]) { seas = Number(parts[0]); ep = Number(parts[1]); }
-  }
+  try {
+    var last = localStorage.getItem("wl_last_" + slug);
+    if (last && last !== "m") {
+      var parts = last.split(":");
+      if (S.seasons && S.seasons[Number(parts[0])]) { seas = Number(parts[0]); ep = Number(parts[1]); }
+    }
+  } catch (e) {}
 }
 paint();
 play();
