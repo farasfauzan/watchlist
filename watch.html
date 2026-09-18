@@ -15,6 +15,7 @@
   <button class="btn" id="prev" title="Sebelumnya">&laquo;</button>
   <button class="btn" id="next" title="Berikutnya">&raquo;</button>
   <button class="btn" id="list" title="Daftar episode">&#9776;</button>
+  <button class="btn" id="dl" title="Download">&#10515;</button>
   <span class="badge" id="badge">siap</span>
   <span class="spacer"></span>
   <select id="season" hidden></select>
@@ -22,6 +23,16 @@
 <div class="stage">
   <video id="v" controls playsinline preload="metadata"></video>
   <div class="pick" id="pick"></div>
+  <div class="dlp" id="dlp">
+    <h2 id="dlt">Download</h2>
+    <div class="dlq" id="dlq"></div>
+    <div class="dlrow">
+      
+    </div>
+    <p class="dlnote" id="dlnote">Pilih kualitas, link-nya langsung dicopy.</p>
+    <div class="dlbar" id="dlbar"><i></i></div>
+    <button class="btn" id="dlclose">Tutup</button>
+  </div>
   <div class="ovl" id="ovl"><div class="spin"></div><div id="msg">Menyiapkan…</div></div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
@@ -164,6 +175,58 @@ function fail(why) {
   ovl.classList.remove("hide");
 }
 
+/* ---- download ----
+   Measured: /pl/ and /generate.php allow cross-origin, but /content/ (the actual video
+   segments) answers **403 with no CORS headers** for any request carrying an Origin
+   header. A browser on another origin therefore CANNOT fetch the segments -- which is
+   also why hls.js dies with fragLoadError while Safari's native player (no XHR, no
+   Origin) plays fine. So there is no in-page "save to phone"; the honest options are
+   the link below, or dl.py on a machine that is on this same network. */
+var LASTURL = null;
+
+function toggleDL(on){
+  var el = document.getElementById("dlp");
+  el.classList.toggle("on", on);
+  if (!on || !LASTURL) return;
+  document.getElementById("dlt").textContent = S.name + (isMovie() ? "" : " S" + seas + "E" + ep);
+  fetch(LASTURL, {credentials:"omit"}).then(function(r){ return r.text(); }).then(function(t){
+    var out = [];
+    var lines = t.split("\n").filter(function(l){ return l.trim(); });
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf("#EXT-X-STREAM-INF") !== 0) continue;
+      var m = /RESOLUTION=(\d+)x(\d+)/.exec(lines[i]), b = /BANDWIDTH=(\d+)/.exec(lines[i]);
+      if (m && lines[i+1]) out.push({h: +m[2], bw: b ? Math.round(b[1]/1000) : 0, u: lines[i+1].trim()});
+    }
+    out.sort(function(a,b){ return b.h - a.h; });
+    var q = document.getElementById("dlq");
+    q.innerHTML = "";
+    if (!out.length) { document.getElementById("dlnote").textContent = "Sumber ini cuma satu kualitas."; return; }
+    out.forEach(function(v){
+      var btn = document.createElement("button");
+      btn.className = "dlopt";
+      btn.innerHTML = v.h + "p<em>" + (v.bw ? (v.bw / 1000).toFixed(1) + " Mbps" : "") + "</em>";
+      btn.onclick = function(){ copyTo(host(v.u), btn); };
+      q.appendChild(btn);
+    });
+    document.getElementById("dlnote").textContent = "Tap kualitas, link m3u8-nya dicopy. " + DL_HINT;
+  }).catch(function(e){
+    document.getElementById("dlnote").textContent = "Gagal baca kualitas: " + e.message;
+  });
+}
+document.getElementById("dl").onclick = function(){ toggleDL(true); };
+document.getElementById("dlclose").onclick = function(){ toggleDL(false); };
+var DL_HINT = "Tempel di VLC / IDM / yt-dlp (1080p \u2248 0,6 GB per episode, hasil ukur).";
+function host(u){ return u.indexOf("http") === 0 ? u : new URL(LASTURL).origin + u; }
+function copyTo(u, btn){
+  var done = function(){
+    btn.classList.add("on");
+    document.getElementById("dlnote").textContent = "Link " + btn.firstChild.textContent + " dicopy \u2192 tempel di VLC / IDM / yt-dlp.";
+  };
+  window.__lastcopy = u;
+  if (navigator.clipboard) navigator.clipboard.writeText(u).then(done, function(){ prompt("Copy link:", u); });
+  else prompt("Copy link:", u);
+}
+
 async function play() {
   var label = S.name + (isMovie() ? "" : " S" + seas + "E" + ep);
   retried = false;
@@ -175,6 +238,7 @@ async function play() {
   setBadge("menyambung");
   try {
     var url = await resolve(S, seas, ep);
+    LASTURL = url;
     say("Buffering…");
     setBadge("1080p");
     var safari = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
