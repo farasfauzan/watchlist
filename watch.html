@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#08080a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Watch</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="watch">
+<div class="topbar">
+  <h1 id="ttl">Memuat…</h1>
+  <button class="btn" id="prev" title="Sebelumnya">&laquo;</button>
+  <button class="btn" id="next" title="Berikutnya">&raquo;</button>
+  <button class="btn" id="list" title="Daftar episode">&#9776;</button>
+  <span class="badge" id="badge">siap</span>
+  <span class="spacer"></span>
+  <select id="season" hidden></select>
+</div>
+<div class="stage">
+  <video id="v" controls playsinline preload="metadata"></video>
+  <div class="pick" id="pick"></div>
+  <div class="ovl" id="ovl"><div class="spin"></div><div id="msg">Menyiapkan…</div></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+<script>
+/* ---- title catalog ---- */
+var SHOWS = {
+  "loki":           {name:"Loki", tmdb:84958, seasons:{1:6, 2:6}},
+  "breaking-bad":   {name:"Breaking Bad", tmdb:1396, seasons:{1:7, 2:13, 3:13, 4:13, 5:16}},
+  "john-wick-4":    {name:"John Wick: Chapter 4", movie:603692, run:"2j 49m"},
+};
+
+/* ---- read the request ---- */
+var P = new URLSearchParams(location.search);
+var slug = P.get("show") || "loki";
+var S = SHOWS[slug] || SHOWS.loki;
+var ep = Math.max(1, Number(P.get("e")) || 1);
+var seas = Number(P.get("s")) || (S.seasons ? Number(Object.keys(S.seasons)[0]) : 0);
+
+var v = document.getElementById("v");
+var ovl = document.getElementById("ovl");
+var msg = document.getElementById("msg");
+var badge = document.getElementById("badge");
+var pick = document.getElementById("pick");
+var sel = document.getElementById("season");
+var hls = null;
+
+function say(t){ msg.textContent = t; }
+function showOvl(t){ say(t); ovl.classList.remove("hide"); }
+function hideOvl(){ ovl.classList.add("hide"); }
+function setBadge(t){ badge.textContent = t; }
+
+function total(){
+  if (S.movie) return 1;
+  return S.seasons[seas];
+}
+function isMovie(){ return !!S.movie; }
+
+/* ---- the ad-free chain ----
+   1. data.vidsrc.sh API      -> encrypted stream_urls + per-window wasm
+   2. wasm (ChaCha20)         -> plaintext array of HLS urls
+   3. <host>/generate.php     -> per-IP token
+   4. url?token=...           -> playable HLS, straight into <video>
+   No wrapper page, no iframes, no ad networks. */
+async function decrypt(vs, b64s) {
+  var wb = await fetch(vs.wasm_url, {credentials:"omit"}).then(function(r){ return r.arrayBuffer(); });
+  var mod = await WebAssembly.compile(wb);
+  var inst = await WebAssembly.instantiate(mod, {});
+  var ex = inst.exports;
+  var bin = atob(b64s), enc = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) enc[i] = bin.charCodeAt(i);
+  var ptr = ex.alloc(enc.length);
+  new Uint8Array(ex.memory.buffer, ptr, enc.length).set(enc);
+  var n = ex.decrypt(ptr, enc.length);
+  var txt = new TextDecoder().decode(new Uint8Array(ex.memory.buffer, ptr + 12, n));
+  return txt.split("\n").filter(Boolean);
+}
+
+async function resolve(show, season, episode) {
+  var q = show.movie
+    ? "type=movie&tmdb=" + show.movie + "&stream_urls"
+    : "type=tv&tmdb=" + show.tmdb + "&season=" + season + "&episode=" + episode + "&stream_urls";
+  var j = await fetch("https://data.vidsrc.sh/api.php?" + q,
+                      {credentials:"omit", headers:{accept:"application/json"}}).then(function(r){ return r.json(); });
+  var u = j.data.stream_urls;
+  if (j.vs && typeof u === "string") u = await decrypt(j.vs, u);
+  if (!Array.isArray(u) || !u.length) throw new Error("no stream");
+  var base = new URL(u[0]);
+  var tk = (await fetch(base.origin + "/generate.php", {credentials:"omit"}).then(function(r){ return r.text(); })).trim();
+  window.__file = j.data.file_name || "";
+  return u[0] + (u[0].indexOf("?") >= 0 ? "&" : "?") + "token=" + encodeURIComponent(tk);
+}
+
+/* hls.js reaches the segments over XHR; that CDN only sends CORS headers for the
+   playlists, so on desktop Chromium the segment fetch is blocked. Safari plays HLS
+   natively (no XHR, no CORS) — which is why this page is built for phones. Any fatal
+   error downgrades to the embed link instead of leaving a black rectangle. */
+function fail(why) {
+  var link = isMovie()
+    ? "https://vidsrc.to/embed/movie/" + S.movie
+    : "https://vidsrc.to/embed/tv/" + S.tmdb + "/" + seas + "-" + ep;
+  setBadge("cadangan");
+  msg.innerHTML = "";
+  msg.appendChild(document.createTextNode(why));
+  msg.appendChild(document.createElement("br"));
+  var a = document.createElement("a");
+  a.href = link; a.textContent = "Buka lewat jalur cadangan \u2192";
+  msg.appendChild(a);
+  var note = document.createElement("div");
+  note.style.cssText = "margin-top:10px;font-size:12px;color:#7c7c8a";
+  note.textContent = "Di iPhone/Safari jalur utama jalan langsung tanpa iklan.";
+  msg.appendChild(note);
+  ovl.classList.remove("hide");
+}
+
+async function play() {
+  var label = S.name + (isMovie() ? "" : " S" + seas + "E" + ep);
+  document.getElementById("ttl").textContent = label;
+  document.title = label;
+  if (hls) { try { hls.destroy(); } catch(e){} hls = null; }
+  v.removeAttribute("src"); v.load();
+  showOvl("Menyiapkan " + (isMovie() ? "film" : "episode " + ep) + "…");
+  setBadge("menyambung");
+  try {
+    var url = await resolve(S, seas, ep);
+    say("Buffering…");
+    setBadge("1080p");
+    // Chromium reports canPlayType('application/vnd.apple.mpegurl') as "maybe" but cannot
+    // actually demux HLS, so gate on the engine, not on canPlayType. Safari plays HLS
+    // natively (PiP, AirPlay, better battery); everyone else gets hls.js over MSE.
+    var safari = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+                 (/Safari/.test(navigator.userAgent) && !/Chrome|Chromium|CriOS|Android|Edg/.test(navigator.userAgent));
+    if (safari && v.canPlayType("application/vnd.apple.mpegurl")) {
+      v.src = url;
+    } else if (window.Hls && Hls.isSupported()) {
+      hls = new Hls({enableWorker:true});
+      hls.on(Hls.Events.ERROR, function(e, d) { if (d.fatal) fail("Gagal memuat (" + d.details + ")"); });
+      hls.loadSource(url); hls.attachMedia(v);
+    } else {
+      throw new Error("HLS tidak didukung browser ini");
+    }
+    v.play().catch(function(){});
+    localStorage.setItem("wl_last_" + slug, isMovie() ? "m" : seas + ":" + ep);
+  } catch (err) {
+    fail(err.message);
+  }
+}
+
+/* the overlay is just a poster — tap it to retry, and hide it once frames arrive */
+v.addEventListener("loadeddata", hideOvl);
+v.addEventListener("playing", hideOvl);
+ovl.addEventListener("click", function(e){ if (e.target.tagName !== "A") play(); });
+
+/* ---- episode / season UI ---- */
+function paint() {
+  var n = total();
+  if (S.seasons) {
+    var keys = Object.keys(S.seasons).map(Number).sort(function(a,b){ return a-b; });
+    if (keys.length > 1) {
+      sel.hidden = false;
+      if (!sel.options.length) {
+        keys.forEach(function(k){ sel.add(new Option("Season " + k, k)); });
+      }
+      sel.value = seas;
+    }
+  }
+  pick.innerHTML = "";
+  for (var i = 1; i <= n; i++) {
+    var a = document.createElement("a");
+    a.href = "#" + i; a.textContent = i; a.dataset.n = i;
+    if (i === ep) a.className = "cur";
+    pick.appendChild(a);
+  }
+  if (n === 1) { document.getElementById("list").hidden = true; }
+}
+function go(n, s) {
+  n = Math.max(1, Math.min(total(), n));
+  if (s) seas = s;
+  ep = n;
+  history.replaceState(null, "", "?show=" + slug + (isMovie() ? "" : "&s=" + seas + "&e=" + ep));
+  paint(); play();
+}
+pick.addEventListener("click", function(e){
+  var a = e.target.closest("a[data-n]"); if (!a) return;
+  e.preventDefault(); go(Number(a.dataset.n)); pick.classList.remove("on");
+});
+document.getElementById("list").onclick = function(){ pick.classList.toggle("on"); };
+document.getElementById("prev").onclick = function(){ go(ep - 1); };
+document.getElementById("next").onclick = function(){ go(ep + 1); };
+sel.addEventListener("change", function(){ go(1, Number(sel.value)); });
+document.addEventListener("keydown", function(e){
+  if (e.key === "ArrowRight") go(ep + 1);
+  if (e.key === "ArrowLeft") go(ep - 1);
+});
+
+/* resume where we left off */
+if (!P.get("e")) {
+  var last = localStorage.getItem("wl_last_" + slug);
+  if (last && last !== "m") {
+    var parts = last.split(":");
+    if (S.seasons && S.seasons[Number(parts[0])]) { seas = Number(parts[0]); ep = Number(parts[1]); }
+  }
+}
+paint();
+play();
+</script>
+</body>
+</html>
