@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#08080a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Breaking Bad</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1 data-f="title">Breaking Bad</h1>
+  <p class="sub" data-f="meta">5 season · 62 episode · Sub Indo · 720p · tanpa iklan</p>
+</header>
+<main>
+  <div class="tabs" id="tabs"></div>
+  <div class="grid" id="grid"></div>
+  <div class="grid" id="movie" style="display:none"></div>
+  <div class="note"><b>Cara pakai</b>
+<ol class="tips">
+  <li>Tap nomor episode &rarr; player kebuka fullscreen.</li>
+  <li>Habis nonton, <b>swipe dari tepi kiri</b> buat balik, tap nomor berikutnya.</li>
+  <li>Nomor yang sudah ditonton ditandai hijau &middot; mau kayak app? <b>Share &rarr; Add to Home Screen</b>.</li>
+</ol></div>
+</main>
+<script>window.SHOW = {
+  title: "Breaking Bad",
+  meta: "5 season \u00b7 62 episode \u00b7 Sub Indo \u00b7 720p \u00b7 tanpa iklan",
+  groups: [
+    {label:"S1", count:7,  href:n=>`https://vidsrc.to/embed/tv/1396/1-${n}`},
+    {label:"S2", count:13, href:n=>`https://vidsrc.to/embed/tv/1396/2-${n}`},
+    {label:"S3", count:13, href:n=>`https://vidsrc.to/embed/tv/1396/3-${n}`},
+    {label:"S4", count:13, href:n=>`https://vidsrc.to/embed/tv/1396/4-${n}`},
+    {label:"S5", count:16, href:n=>`https://vidsrc.to/embed/tv/1396/5-${n}`}
+  ]
+};</script>
+<script src="player.js"></script>
+</body>
+</html>
