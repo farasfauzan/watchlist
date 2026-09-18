@@ -56,7 +56,8 @@
     tabs.style.display = 'none';
   }
 
-  // mark watched on the way out — the tab opens in _blank so this page stays alive
+  // mark watched on the way out — the localStorage write is synchronous, so it survives
+  // the same-tab navigation to the player (Safari back-swipe brings the grid back)
   document.addEventListener('click', function (ev) {
     var a = ev.target.closest('a.ep, a.hero');
     if (!a) return;
